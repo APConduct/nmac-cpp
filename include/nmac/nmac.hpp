@@ -95,50 +95,67 @@ namespace nmac {
         PatternNode parse_sequence() {
             PatternNode seq(PatternNode::SEQUENCE);
 
-            while (pos < pattern.size() && peek() != ')' && peek() != '}') {
+            while (pos < pattern.size() && peek() != ')' && peek() != '}' && peek() != ']') {
                 skip_whitespace();
                 if (pos >= pattern.size()) break;
-                PatternNode node = parse_atom();
 
-                skip_whitespace();
-                if (peek() == '*' || peek() == '+' || peek() == '?') {
+                if (peek() == '$') {
+                    // Variable
+                    advance();
+                    PatternNode var = parse_variable();
+                    seq.children.push_back(std::move(var));
+                } else if ((peek() == '+' || peek() == '-' || peek() == '*' || peek() == '/' || peek() == '=') &&
+                           (seq.children.empty() || std::isspace(pattern[pos - 1]))) {
+                    // Explicit operator handling - only when it's separated by space or at the beginning
                     char op = advance();
+                    PatternNode lit(PatternNode::LITERAL);
+                    lit.content = std::string_view(&op, 1);
+                    seq.children.push_back(std::move(lit));
+                } else if (peek() == '(') {
+                    // Group
+                    advance();
+                    PatternNode group = parse_sequence();
+                    if (peek() == ')') advance();
+                    seq.children.push_back(std::move(group));
+                } else if (peek() == '[') {
+                    // Optional
+                    advance();
+                    PatternNode opt(PatternNode::OPTIONAL);
+                    opt.children.push_back(parse_sequence());
+                    if (peek() == ']') advance();
+                    seq.children.push_back(std::move(opt));
+                } else if (!std::isspace(peek())) {
+                    // Other literal
+                    PatternNode lit = parse_literal();
+                    if (!lit.content.empty()) {
+                        seq.children.push_back(std::move(lit));
+                    }
+                } else {
+                    // Skip unexpected whitespace
+                    advance();
+                }
+
+                // Check for repetition operators, but only if they're not meant to be literals
+                // This is the key change: we only treat *, +, ? as repetition operators if they're not
+                // meant to be used as literal operators in the pattern
+                skip_whitespace();
+                if ((peek() == '*' || peek() == '?' ||
+                    (peek() == '+' && (pos == 0 || pattern[pos-1] != '$'))) &&
+                    !seq.children.empty()) {
+                    char op = advance();
+                    // Create repetition node
                     PatternNode rep(PatternNode::REPETITION);
                     rep.content = std::string_view(&op, 1);
-                    rep.children.push_back(std::move(node));
-                    seq.children.push_back(std::move(rep));
-                } else {
-                    seq.children.push_back(std::move(node));
+                    if (!seq.children.empty()) {
+                        rep.children.push_back(std::move(seq.children.back()));
+                        seq.children.back() = std::move(rep);
+                    }
                 }
             }
+
             return seq;
         }
 
-
-        PatternNode parse_atom() {
-            skip_whitespace();
-            char c = peek();
-
-            if (c == '$') {
-                advance();
-                return parse_variable();
-            } else if (c == '(') {
-                advance();
-                PatternNode group = parse_sequence();
-                skip_whitespace();
-                if (peek() == ')') advance();
-                return group;
-            } else if (c == '[') {
-                advance();
-                PatternNode opt(PatternNode::OPTIONAL);
-                opt.children.push_back(parse_sequence());
-                skip_whitespace();
-                if (peek()  == ']') advance();
-                return opt;
-            } else {
-                return parse_literal();
-            }
-        }
 
         PatternNode parse_variable() {
             size_t start = pos;
@@ -154,17 +171,19 @@ namespace nmac {
         PatternNode parse_literal() {
             size_t start = pos;
             while (pos < pattern.size() && !std::isspace(peek()) &&
-                peek() != '$' && peek() != '(' && peek() != ')' &&
-                peek() != '[' && peek() != ']' && peek() != '*' &&
-                peek() != '+' && peek() != '?') {
+                   peek() != '$' && peek() != '(' && peek() != ')' &&
+                   peek() != '[' && peek() != ']' && peek() != '+' &&
+                   peek() != '-' && peek() != '*' && peek() != '/' &&
+                   peek() != '=' && peek() != '?' && peek() != ',') {
                 advance();
-                }
+            }
+
             PatternNode lit(PatternNode::LITERAL);
             lit.content = pattern.substr(start, pos - start);
             return lit;
         }
-
     };
+
 
     template<typename Input>
     class PatternMatcher {
