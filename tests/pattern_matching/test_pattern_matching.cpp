@@ -12,106 +12,188 @@ void print_input(const std::vector<std::string>& input) {
     }
 }
 
-void test_pattern_parser() {
-    // We're keeping the pattern with the + operator
-    nmac::PatternParser parser("$var1+$var2");
-    auto pattern = parser.parse();
+// Helper function to print pattern structure
+void print_pattern(const nmac::PatternNode& pattern, int indent = 0) {
+    std::string indent_str(indent * 2, ' ');
+    std::cout << indent_str << "Type: " << pattern.type
+              << ", Content: '" << pattern.content
+              << "', Position: " << pattern.source_position << std::endl;
 
-    // Print debug information
-    std::cout << "Pattern children count: " << pattern.children.size() << std::endl;
-    for (size_t i = 0; i < pattern.children.size(); ++i) {
-        std::cout << "Child " << i << ": type=" << pattern.children[i].type
-                  << ", content length=" << pattern.children[i].content.size() << std::endl;
-
-        if (pattern.children[i].type == nmac::PatternNode::REPETITION) {
-            std::cout << "  Repetition children count: " << pattern.children[i].children.size() << std::endl;
-            if (!pattern.children[i].children.empty()) {
-                std::cout << "  First child type: " << pattern.children[i].children[0].type
-                          << ", content='" << pattern.children[i].children[0].content << "'" << std::endl;
-            }
+    if (!pattern.children.empty()) {
+        std::cout << indent_str << "Children (" << pattern.children.size() << "):" << std::endl;
+        for (const auto& child : pattern.children) {
+            print_pattern(child, indent + 1);
         }
     }
+}
 
-    // Update assertions to match actual parser behavior
+void test_pattern_parser() {
+    // Test the enhanced pattern parser
+    std::cout << "Testing enhanced pattern parser with basic pattern\n";
+    nmac::PatternParser parser("$var1 + $var2");
+    auto pattern = parser.parse();
+
+    std::cout << "Parsed pattern structure:\n";
+    print_pattern(pattern);
+
+    // Verify the pattern has the expected structure
     assert(pattern.type == nmac::PatternNode::SEQUENCE);
-    assert(pattern.children.size() == 2);
+    assert(pattern.children.size() == 3);
 
-    // First child should be a REPETITION node containing the "var1" variable
-    assert(pattern.children[0].type == nmac::PatternNode::REPETITION);
-    // Don't check the exact content of the repetition node
-    assert(pattern.children[0].children.size() == 1);
-    assert(pattern.children[0].children[0].type == nmac::PatternNode::VARIABLE);
-    assert(pattern.children[0].children[0].content == "var1");
+    // First child should be a variable
+    assert(pattern.children[0].type == nmac::PatternNode::VARIABLE);
+    assert(pattern.children[0].content == "var1");
 
-    // Second child should be a VARIABLE node for "var2"
-    assert(pattern.children[1].type == nmac::PatternNode::VARIABLE);
-    assert(pattern.children[1].content == "var2");
+    // Second child should be an operator
+    assert(pattern.children[1].type == nmac::PatternNode::OPERATOR);
+    assert(pattern.children[1].content == "+");
+
+    // Third child should be a variable
+    assert(pattern.children[2].type == nmac::PatternNode::VARIABLE);
+    assert(pattern.children[2].content == "var2");
+
+    // Test parsing with escaped characters
+    std::cout << "\nTesting pattern with escaped characters\n";
+    nmac::PatternParser parser2("$var1 \\+ $var2");
+    auto pattern2 = parser2.parse();
+
+    std::cout << "Parsed pattern with escaped characters:\n";
+    print_pattern(pattern2);
+
+    assert(pattern2.type == nmac::PatternNode::SEQUENCE);
+    assert(pattern2.children.size() == 3);
+    assert(pattern2.children[1].type == nmac::PatternNode::LITERAL);
+    assert(pattern2.children[1].content == "+");
+
+    // Test pattern with repetition
+    std::cout << "\nTesting pattern with repetition\n";
+    nmac::PatternParser parser3("$var1+ $var2");
+    auto pattern3 = parser3.parse();
+
+    std::cout << "Parsed pattern with repetition:\n";
+    print_pattern(pattern3);
+
+    assert(pattern3.type == nmac::PatternNode::SEQUENCE);
+    assert(pattern3.children.size() == 2);
+    assert(pattern3.children[0].type == nmac::PatternNode::REPETITION);
+    assert(pattern3.children[0].content == "+");
+    assert(pattern3.children[0].children.size() == 1);
+    assert(pattern3.children[0].children[0].type == nmac::PatternNode::VARIABLE);
+    assert(pattern3.children[0].children[0].content == "var1");
+
+    // Test error reporting
+    std::cout << "\nTesting error reporting\n";
+    nmac::PatternParser parser4("$var1 + $");
+    auto pattern4 = parser4.parse();
+
+    if (parser4.has_error()) {
+        std::cout << "Error detected: " << parser4.get_error_message()
+                  << " at position " << parser4.get_error_position() << std::endl;
+    }
+
+    assert(parser4.has_error());
 }
 
 void test_pattern_matcher() {
-    // Create the simplest possible pattern for testing
+    // Test basic matching with the enhanced matcher
+    std::cout << "\nTesting enhanced pattern matching\n";
+
+    // Create a pattern: "$var1 + $var2"
     nmac::PatternNode pattern(nmac::PatternNode::SEQUENCE);
-
-    // Just add one variable node
     pattern.children.push_back(nmac::PatternNode(nmac::PatternNode::VARIABLE, "var1"));
+    pattern.children.push_back(nmac::PatternNode(nmac::PatternNode::OPERATOR, "+"));
+    pattern.children.push_back(nmac::PatternNode(nmac::PatternNode::VARIABLE, "var2"));
 
-    // Create a simple input with one string
-    std::vector<std::string> input = {"10"};
+    // Input data
+    std::vector<std::string> input = {"10", "+", "20"};
     print_input(input);
 
-    // Create the matcher
-    std::cout << "Creating matcher with single variable pattern and single string input\n";
+    // Create matcher
     nmac::PatternMatcher<std::vector<std::string>> matcher(pattern, input);
 
-    // Try to match
-    std::cout << "Calling matcher.match()\n";
+    // Match
     bool match_result = matcher.match();
-    std::cout << "Match result: " << (match_result ? "true" : "false") << "\n";
+    std::cout << "Match result: " << (match_result ? "true" : "false") << std::endl;
 
-    // Assert the match succeeds
+    if (!match_result && matcher.has_error()) {
+        std::cout << "Match error: " << matcher.get_error_message()
+                  << " at position " << matcher.get_error_position() << std::endl;
+    }
+
     assert(match_result);
 
-    // If we get here, the basic matching works
-    std::cout << "Basic matching test passed\n";
-
-    // Now try with two variables
-    nmac::PatternNode pattern2(nmac::PatternNode::SEQUENCE);
-    pattern2.children.push_back(nmac::PatternNode(nmac::PatternNode::VARIABLE, "var1"));
-    pattern2.children.push_back(nmac::PatternNode(nmac::PatternNode::VARIABLE, "var2"));
-
-    // Input with two strings
-    std::vector<std::string> input2 = {"10", "20"};
-    print_input(input2);
-
-    // Create the matcher
-    std::cout << "Creating matcher with two variables pattern and two strings input\n";
-    nmac::PatternMatcher<std::vector<std::string>> matcher2(pattern2, input2);
-
-    // Try to match
-    std::cout << "Calling matcher2.match()\n";
-    bool match_result2 = matcher2.match();
-    std::cout << "Match result: " << (match_result2 ? "true" : "false") << "\n";
-
-    // Assert the match succeeds
-    assert(match_result2);
-
     // Check captures
-    auto captures = matcher2.get_captures();
+    auto captures = matcher.get_captures();
     assert(captures.size() == 2);
     assert(captures[0].first == "var1" && captures[0].second == "10");
     assert(captures[1].first == "var2" && captures[1].second == "20");
 
-    std::cout << "Two-variable matching test passed\n";
+    // Test matching with errors
+    std::cout << "\nTesting matcher with error cases\n";
+
+    std::vector<std::string> bad_input = {"10", "-", "20"};
+    print_input(bad_input);
+
+    nmac::PatternMatcher<std::vector<std::string>> bad_matcher(pattern, bad_input);
+    bool bad_match_result = bad_matcher.match();
+
+    std::cout << "Bad match result: " << (bad_match_result ? "true" : "false") << std::endl;
+
+    if (!bad_match_result && bad_matcher.has_error()) {
+        std::cout << "Bad match error: " << bad_matcher.get_error_message()
+                  << " at position " << bad_matcher.get_error_position() << std::endl;
+    }
+
+    assert(!bad_match_result);
+    assert(bad_matcher.has_error());
+}
+
+void test_repetition_matching() {
+    std::cout << "\nTesting repetition matching\n";
+
+    // Create a pattern with repetition: "$item+"
+    nmac::PatternNode seq(nmac::PatternNode::SEQUENCE);
+    nmac::PatternNode var(nmac::PatternNode::VARIABLE, "item");
+    nmac::PatternNode rep(nmac::PatternNode::REPETITION, "+");
+    rep.children.push_back(var);
+    seq.children.push_back(rep);
+
+    // Input with multiple items
+    std::vector<std::string> input = {"a", "b", "c"};
+    print_input(input);
+
+    nmac::PatternMatcher<std::vector<std::string>> matcher(seq, input);
+    bool match_result = matcher.match();
+
+    std::cout << "Repetition match result: " << (match_result ? "true" : "false") << std::endl;
+
+    if (match_result) {
+        auto captures = matcher.get_captures();
+        std::cout << "Captures (" << captures.size() << "):" << std::endl;
+        for (const auto& capture : captures) {
+            std::cout << "  " << capture.first << " = " << capture.second << std::endl;
+        }
+    } else if (matcher.has_error()) {
+        std::cout << "Match error: " << matcher.get_error_message()
+                  << " at position " << matcher.get_error_position() << std::endl;
+    }
+
+    assert(match_result);
+    assert(matcher.get_captures().size() == 3);
 }
 
 int main() {
-    std::cout << "Starting pattern parser test\n";
+    std::cout << "Starting enhanced pattern parser test\n";
     test_pattern_parser();
-    std::cout << "Pattern parser test passed\n";
+    std::cout << "Enhanced pattern parser test completed\n";
 
-    std::cout << "Starting pattern matcher test\n";
+    std::cout << "\nStarting enhanced pattern matcher test\n";
     test_pattern_matcher();
-    std::cout << "Pattern matcher test passed\n";
+    std::cout << "Enhanced pattern matcher test completed\n";
+
+    std::cout << "\nStarting repetition matching test\n";
+    test_repetition_matching();
+    std::cout << "Repetition matching test completed\n";
 
     return 0;
 }

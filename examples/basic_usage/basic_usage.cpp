@@ -18,7 +18,7 @@ int main() {
     constexpr auto expr = lit(10) + lit(20) + var<"x">();
 
     struct Context {
-        constexpr int get(nmac::ct_string<2> name) const {
+        [[nodiscard]] static constexpr int get(nmac::ct_string<2> name) {
             if (name.view() == "x") return 5;
             return 0;
         }

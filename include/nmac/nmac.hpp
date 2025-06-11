@@ -9,6 +9,8 @@
 #include <functional>
 #include <concepts>
 #include <any>
+#include <iostream>
+#include <sstream>
 
 namespace nmac {
     template<size_t N>
@@ -59,17 +61,21 @@ namespace nmac {
 
     // Pattern AST nodes
     struct PatternNode {
-        enum Type { LITERAL, VARIABLE, SEQUENCE, OPTIONAL, REPETITION };
+        enum Type { LITERAL, VARIABLE, SEQUENCE, OPTIONAL, REPETITION, OPERATOR };
         Type type;
-        std::string_view content; // For literals and variables
+        std::string content; // For literals and variables
         std::vector<PatternNode> children; // For sequences, optional, and repetitions
+        size_t source_position; // For error reporting
 
-        PatternNode(Type t, std::string_view c = "") : type(t), content(c) {}
+        PatternNode(Type t, std::string_view c = "", size_t pos = 0)
+            : type(t), content(std::move(c)), source_position(pos) {}
     };
 
     class PatternParser {
         std::string_view pattern;
         size_t pos = 0;
+        std::string error_message;
+        size_t error_position = 0;
 
         constexpr char peek() const {
             return pos < pattern.size() ? pattern[pos] : '\0';
@@ -83,17 +89,44 @@ namespace nmac {
             while (pos < pattern.size() && std::isspace(pattern[pos])) pos++;
         }
 
+        char peek_ahead(size_t offset = 1) const {
+            return (pos + offset) < pattern.size() ? pattern[pos + offset] : '\0';
+        }
+
+        bool is_operator(char c) const {
+            return c == '+' || c == '-' || c == '*' || c == '/' || c == '=';
+        }
+
+        bool is_repetition_operator(char c) const {
+            return c == '*' || c == '+' || c == '?';
+        }
+
+        void set_error(const std::string& message) {
+            error_message = message;
+            error_position = pos;
+        }
+
     public:
         constexpr PatternParser(std::string_view p) : pattern(p) {}
 
         PatternNode parse() {
             skip_whitespace();
-            return parse_sequence();
+            auto result = parse_sequence();
+
+            skip_whitespace();
+            if (pos < pattern.size()) {
+                set_error("Unexpected characters at end of pattern");
+            }
+            return result;
         }
+
+        bool has_error() const { return !error_message.empty(); }
+        const std::string& get_error_message() const { return error_message; }
+        size_t get_error_position() const { return error_position; }
 
     private:
         PatternNode parse_sequence() {
-            PatternNode seq(PatternNode::SEQUENCE);
+            PatternNode seq(PatternNode::SEQUENCE, "", pos);
 
             while (pos < pattern.size() && peek() != ')' && peek() != '}' && peek() != ']') {
                 skip_whitespace();
@@ -101,28 +134,54 @@ namespace nmac {
 
                 if (peek() == '$') {
                     // Variable
-                    advance();
+                    size_t var_pos = pos;
+                    advance();  // Skip the '$'
                     PatternNode var = parse_variable();
+                    var.source_position = var_pos;
                     seq.children.push_back(std::move(var));
-                } else if ((peek() == '+' || peek() == '-' || peek() == '*' || peek() == '/' || peek() == '=') &&
-                           (seq.children.empty() || std::isspace(pattern[pos - 1]))) {
-                    // Explicit operator handling - only when it's separated by space or at the beginning
-                    char op = advance();
-                    PatternNode lit(PatternNode::LITERAL);
-                    lit.content = std::string_view(&op, 1);
+                } else if (peek() == '\\') {
+                    advance();
+                    if (pos >= pattern.size()) {
+                        set_error("Unexpected end of pattern after escape character");
+                        break;
+                    }
+                    char escaped = advance();
+                    PatternNode lit(PatternNode::LITERAL, std::string(1, escaped), pos - 2);
                     seq.children.push_back(std::move(lit));
+                } else if (is_operator(peek())) {
+                    bool is_binary_op = true;
+
+                    if (is_repetition_operator(peek())) {
+                        if (!seq.children.empty() && !std::isspace(pattern[pos - 1])) {
+                            is_binary_op = false;
+                        }
+                    }
+
+                    if (is_binary_op) {
+                        size_t op_pos = pos;
+                        std::string op_str(1, advance());
+                        PatternNode op(PatternNode::OPERATOR, std::move(op_str), op_pos);
+                        seq.children.push_back(std::move(op));
+                    } else {
+                        handle_repetition(seq);
+                    }
                 } else if (peek() == '(') {
                     // Group
+                    size_t group_pos = pos;
                     advance();
                     PatternNode group = parse_sequence();
+                    group.source_position = group_pos;
                     if (peek() == ')') advance();
+                    else set_error("Unclosed group: missing ')'");
                     seq.children.push_back(std::move(group));
                 } else if (peek() == '[') {
                     // Optional
+                    size_t opt_pos = pos;
                     advance();
-                    PatternNode opt(PatternNode::OPTIONAL);
+                    PatternNode opt(PatternNode::OPTIONAL, "", opt_pos);
                     opt.children.push_back(parse_sequence());
                     if (peek() == ']') advance();
+                    else set_error("Unclosed optional group: missing ']'");
                     seq.children.push_back(std::move(opt));
                 } else if (!std::isspace(peek())) {
                     // Other literal
@@ -139,21 +198,24 @@ namespace nmac {
                 // This is the key change: we only treat *, +, ? as repetition operators if they're not
                 // meant to be used as literal operators in the pattern
                 skip_whitespace();
-                if ((peek() == '*' || peek() == '?' ||
-                    (peek() == '+' && (pos == 0 || pattern[pos-1] != '$'))) &&
-                    !seq.children.empty()) {
-                    char op = advance();
-                    // Create repetition node
-                    PatternNode rep(PatternNode::REPETITION);
-                    rep.content = std::string_view(&op, 1);
-                    if (!seq.children.empty()) {
-                        rep.children.push_back(std::move(seq.children.back()));
-                        seq.children.back() = std::move(rep);
-                    }
+                if (is_repetition_operator(peek()) && !seq.children.empty()) {
+                    handle_repetition(seq);
                 }
             }
-
             return seq;
+        }
+
+        void handle_repetition(PatternNode& seq) {
+            if (seq.children.empty()) {
+                set_error("Repetition operator without preceding element");
+                return;
+            }
+
+            size_t rep_pos = pos;
+            std::string op_str(1, advance());
+            PatternNode rep(PatternNode::REPETITION, std::move(op_str), rep_pos);
+            rep.children.push_back(std::move(seq.children.back()));
+            seq.children.back() = std::move(rep);
         }
 
 
@@ -163,24 +225,24 @@ namespace nmac {
                 advance();
             }
 
-            PatternNode var(PatternNode::VARIABLE);
-            var.content = pattern.substr(start, pos - start);
-            return var;
+            if (start == pos) {
+                set_error("Empty variable name");
+                return PatternNode(PatternNode::VARIABLE, "", start);
+            }
+
+            return PatternNode(PatternNode::VARIABLE, std::string(pattern.substr(start, pos - start)), start);
         }
 
         PatternNode parse_literal() {
             size_t start = pos;
             while (pos < pattern.size() && !std::isspace(peek()) &&
                    peek() != '$' && peek() != '(' && peek() != ')' &&
-                   peek() != '[' && peek() != ']' && peek() != '+' &&
-                   peek() != '-' && peek() != '*' && peek() != '/' &&
-                   peek() != '=' && peek() != '?' && peek() != ',') {
+                   peek() != '[' && peek() != ']' && peek() != '\\' &&
+                   !is_operator(peek()) && peek() != '?' && peek() != ',') {
                 advance();
-            }
+                   }
 
-            PatternNode lit(PatternNode::LITERAL);
-            lit.content = pattern.substr(start, pos - start);
-            return lit;
+            return PatternNode(PatternNode::LITERAL, std::string(pattern.substr(start, pos - start)), start);
         }
     };
 
@@ -190,6 +252,8 @@ namespace nmac {
         const PatternNode& pattern;
         const Input& input;
         std::vector<std::pair<std::string_view, typename Input::value_type>> captures;
+        std::string error_message;
+        size_t error_position = 0;
 
     public:
         PatternMatcher(const PatternNode& p, const Input& i) : pattern(p), input(i) {}
@@ -203,7 +267,16 @@ namespace nmac {
             return captures;
         }
 
+        bool has_error() const { return !error_message.empty(); }
+        const std::string& get_error_message() const { return error_message; }
+        size_t get_error_position() const { return error_position; }
+
     private:
+        void set_error(const std::string& message, size_t pos) {
+            error_message = message;
+            error_position = pos;
+        }
+
         bool match_node(const PatternNode& node, size_t& input_pos) {
             switch (node.type) {
             case PatternNode::LITERAL:
@@ -216,23 +289,40 @@ namespace nmac {
                 return match_optional(node, input_pos);
             case PatternNode::REPETITION:
                 return match_repetition(node, input_pos);
+            case PatternNode::OPERATOR:
+                return match_operator(node, input_pos);
+            default:
+                set_error("Unknown node type", node.source_position);
+                return false;
             }
             return false; // Should never reach here
         }
 
+
+
         bool match_literal(const PatternNode& node, size_t& input_pos) {
-            if (input_pos >= input.size()) return false;
+            if (input_pos >= input.size()) {
+                set_error("Unexpected end of input while matching literal", node.source_position);
+                return false;
+            }
 
             auto token_content = get_token_content(input[input_pos]);
             if (token_content == node.content) {
                 input_pos++;
                 return true;
             }
+
+            std::ostringstream err;
+            err << "Expected literal '" << node.content << "', got '" << token_content << "'";
+            set_error(err.str(), node.source_position);
             return false;
         }
 
         bool match_variable(const PatternNode& node, size_t& input_pos) {
-            if (input_pos >= input.size()) return false;
+            if (input_pos >= input.size()) {
+                set_error("Unexpected end of input while matching variable", node.source_position);
+                return false;
+            }
 
             captures.emplace_back(node.content, input[input_pos]);
             input_pos++;
@@ -244,6 +334,7 @@ namespace nmac {
             for (const auto& child : node.children) {
                 if (!match_node(child, input_pos)) {
                     input_pos = saved_pos;
+                    // Error is already set by the child match
                     return false;
                 }
             }
@@ -255,6 +346,7 @@ namespace nmac {
             for (const auto& child : node.children) {
                 if (!match_node(child, input_pos)) {
                     input_pos = saved_pos;
+                    error_message.clear(); // Clear error since optional matching is allowed to fail
                     break;
                 }
             }
@@ -262,7 +354,10 @@ namespace nmac {
         }
 
         bool match_repetition(const PatternNode& node, size_t& input_pos) {
-            if (node.children.empty()) return false;
+            if (node.children.empty()) {
+                set_error("Repetition with no child pattern", node.source_position);
+                return false;
+            }
 
             const auto& child = node.children[0];
             char op = node.content[0];
@@ -272,26 +367,65 @@ namespace nmac {
 
             while (input_pos < input.size()) {
                 size_t before_match = input_pos;
+                std::string saved_error = error_message;
+
                 if (!match_node(child, input_pos)) {
                     input_pos = before_match;
+                    error_message = saved_error; // Restore error state
                     break;
                 }
                 matches++;
                 saved_pos = input_pos;
             }
+
             switch (op) {
-            case '*': return true;
-            case '+': return matches > 0;
-            case '?': return matches <= 1;
-                default: return false; // Should never reach here
+            case '*': return true; // Zero or more
+            case '+':
+                if (matches == 0) {
+                    set_error("Expected one or more matches for '+' repetition", node.source_position);
+                    return false;
+                }
+                return true;
+            case '?':
+                if (matches > 1) {
+                    set_error("Expected zero or one match for '?' repetition, got multiple", node.source_position);
+                    return false;
+                }
+                return true;
+            default:
+                set_error("Unknown repetition operator: " + node.content, node.source_position);
+                return false;
             }
-            return false; // Should never reach here
+        }
+
+        bool match_operator(const PatternNode& node, size_t& input_pos) {
+            if (input_pos >= input.size()) {
+                set_error("Unexpected end of input while matching operator", node.source_position);
+                return false;
+            }
+
+            auto token_content = get_token_content(input[input_pos]);
+            if (token_content == node.content) {
+                input_pos++;
+                return true;
+            }
+
+            std::ostringstream err;
+            err << "Expected operator '" << node.content << "', got '" << token_content << "'";
+            set_error(err.str(), node.source_position);
+            return false;
         }
 
         template<typename T>
-        std::string_view get_token_content(const T& token) {
+        std::string get_token_content(const T& token) {
             if constexpr (requires {token.content;}) {
-                return token.content;
+                if constexpr (std::is_same_v<decltype(token.content), std::string_view>) {
+                    return std::string(token.content);
+                } else {
+                    return token.content;
+                }
+            } else if constexpr (std::is_convertible_v<T, std::string>) {
+                return token;
             } else {
                 return ""; // Fallback for simple types
             }
