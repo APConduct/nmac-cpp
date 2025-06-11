@@ -8,6 +8,7 @@
 #include <vector>
 #include <functional>
 #include <concepts>
+#include <any>
 
 namespace nmac {
     template<size_t N>
@@ -152,16 +153,17 @@ namespace nmac {
 
         PatternNode parse_literal() {
             size_t start = pos;
-            while (pos < pattern.size() && std::isspace(peek()) &&
+            while (pos < pattern.size() && !std::isspace(peek()) &&
                 peek() != '$' && peek() != '(' && peek() != ')' &&
                 peek() != '[' && peek() != ']' && peek() != '*' &&
                 peek() != '+' && peek() != '?') {
                 advance();
-            }
+                }
             PatternNode lit(PatternNode::LITERAL);
             lit.content = pattern.substr(start, pos - start);
             return lit;
         }
+
     };
 
     template<typename Input>
@@ -200,7 +202,7 @@ namespace nmac {
         }
 
         bool match_literal(const PatternNode& node, size_t& input_pos) {
-            if (input_pos <= input.size()) return false;
+            if (input_pos >= input.size()) return false;
 
             auto token_content = get_token_content(input[input_pos]);
             if (token_content == node.content) {
@@ -275,6 +277,26 @@ namespace nmac {
                 return ""; // Fallback for simple types
             }
         }
+
+        struct MatchResult {
+            bool success;
+            std::string error_message;
+            size_t error_position;
+            std::vector<std::pair<std::string_view, typename Input::value_type>> captures;
+        };
+
+        MatchResult match_with_diagnostics() {
+            size_t input_pos = 0;
+            MatchResult result;
+            result.success = match_node(pattern, input_pos);
+            if (!result.success) {
+                result.error_position = input_pos;
+                result.error_message = "Failed to match pattern at position " + std::to_string(input_pos);
+            } else {
+                result.captures = captures;
+            }
+            return result;
+        }
     };
 
     // Forward declaration for string comparison
@@ -301,8 +323,17 @@ namespace nmac {
         // TODO: Implement more complex pattern matching logic
     }
 
-    // Macro rule structure
+    template<typename T>
+    concept MacroGeneratorType = requires(std::tuple<int> sample_input) {
+        // Check if T::expand can be called with a tuple argument
+        { T::expand(sample_input) };
+    };
+
+
+
+
     template<ct_string Pattern, typename Generator>
+    requires MacroGeneratorType<Generator>
     struct MacroRule {
         static constexpr auto pattern = Pattern;
         using generator = Generator;
@@ -368,28 +399,51 @@ namespace nmac {
             return try_match_rule<0>(input);
         }
     };
+
+    template<typename Input, typename Transformer>
+    concept MacroTransformer = requires(Input input) {
+        { Transformer::transform(input) }; // Check if transform method exists
+    };
+
+
+
+    template<typename T, typename Transformer>
+    requires MacroTransformer<T, Transformer>
+    class ProceduralMacro {
+    public:
+        template<typename... Args>
+        static auto transform(Args&&... args) {
+            // Create the input structure
+            T input{std::forward<Args>(args)...};
+
+            // Apply the transformer
+            return Transformer::transform(input);
+        }
+    };
+
+    // Generator for vec! macro - inside namespace
+    struct VecGenerator {
+        template<typename Tuple>
+        static constexpr auto expand(const Tuple& tuple) {
+            return std::apply([](const auto&... args) {
+                std::vector<std::common_type_t<decltype(args)...>> result;
+                result.reserve(sizeof...(args));
+                (result.push_back(args), ...);
+                return result;
+            }, tuple);
+        }
+    };
+
+    // Macro rule definition - inside namespace
+    constexpr ct_string vec_pattern = "vec![$(...)]";
+    using VecRule = MacroRule<vec_pattern, VecGenerator>;
+
 }
 
-// Generator for vec! macro - moved outside of namespace
-struct VecGenerator {
-    template<typename Tuple>
-    static constexpr auto expand(const Tuple& tuple) {
-        return std::apply([](const auto&... args) {
-            std::vector<std::common_type_t<decltype(args)...>> result;
-            result.reserve(sizeof...(args));
-            (result.push_back(args), ...);
-            return result;
-        }, tuple);
-    }
-};
-
-// Macro rule definition - moved outside of namespace
-constexpr nmac::ct_string vec_pattern = "vec![$(...)]";
-using VecRule = nmac::MacroRule<vec_pattern, VecGenerator>;
 
 // Safe wrapper macro defined at global scope
 #define VEC_MACRO(...) \
-    nmac::MacroExpander<VecRule>::expand(std::make_tuple(__VA_ARGS__))
+    nmac::MacroExpander<nmac::VecRule>::expand(std::make_tuple(__VA_ARGS__))
 
 namespace pattern_match {
     // Forward declaration to help with template deduction
@@ -493,6 +547,39 @@ namespace expression_dsl {
     template<nmac::ct_string Name>
     constexpr auto var() {
         return Variable<Name>{};  // Fixed: Changed 'n' to 'Name'
+    }
+
+    template<typename LHS, typename RHS>
+    struct SubExpr {
+        LHS lhs;
+        RHS rhs;
+
+        template<typename Context>
+        constexpr auto eval(const Context& ctx) const {
+            return lhs.eval(ctx) - rhs.eval(ctx);
+        }
+    };
+
+    template<typename LHS, typename RHS>
+    struct MulExpr {
+        LHS lhs;
+        RHS rhs;
+
+        template<typename Context>
+        constexpr auto eval(const Context& ctx) const {
+            return lhs.eval(ctx) * rhs.eval(ctx);
+        }
+    };
+
+    // Operator overloads
+    template<typename LHS, typename RHS>
+    constexpr auto operator-(LHS&& lhs, RHS&& rhs) {
+        return SubExpr{std::forward<LHS>(lhs), std::forward<RHS>(rhs)};
+    }
+
+    template<typename LHS, typename RHS>
+    constexpr auto operator*(LHS&& lhs, RHS&& rhs) {
+        return MulExpr{std::forward<LHS>(lhs), std::forward<RHS>(rhs)};
     }
 
 }
