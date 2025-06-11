@@ -149,10 +149,11 @@ namespace nmac {
                     PatternNode lit(PatternNode::LITERAL, std::string(1, escaped), pos - 2);
                     seq.children.push_back(std::move(lit));
                 } else if (is_operator(peek())) {
+
                     bool is_binary_op = true;
 
-                    if (is_repetition_operator(peek())) {
-                        if (!seq.children.empty() && !std::isspace(pattern[pos - 1])) {
+                    if (is_repetition_operator(peek()) && !seq.children.empty()) {
+                        if (pos > 0 && !std::isspace(pattern[pos - 1])) {
                             is_binary_op = false;
                         }
                     }
@@ -192,14 +193,6 @@ namespace nmac {
                 } else {
                     // Skip unexpected whitespace
                     advance();
-                }
-
-                // Check for repetition operators, but only if they're not meant to be literals
-                // This is the key change: we only treat *, +, ? as repetition operators if they're not
-                // meant to be used as literal operators in the pattern
-                skip_whitespace();
-                if (is_repetition_operator(peek()) && !seq.children.empty()) {
-                    handle_repetition(seq);
                 }
             }
             return seq;
