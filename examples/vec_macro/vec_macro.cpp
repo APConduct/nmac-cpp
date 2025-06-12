@@ -72,12 +72,14 @@ int main() {
     // This would demonstrate different vec! patterns
     // For now, we'll just create vectors directly
     auto empty_vec = std::vector<int>{};
-    auto list_vec = std::vector<int>{1, 2, 3};
-    auto repeat_vec = std::vector<int>(5, 42);
+    auto list_vec = std::vector{1, 2, 3};
+    auto repeat_vec = std::vector(5, 42);
 
     std::cout << "Empty vector size: " << empty_vec.size() << "\n";
     std::cout << "List vector size: " << list_vec.size() << "\n";
     std::cout << "Repeat vector size: " << repeat_vec.size() << "\n";
+    std::cout << "Repeat vector size: " << repeat_vec.size() << "\n";
+
 
     return 0;
 }
